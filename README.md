@@ -69,10 +69,10 @@ other_appid = name
 [![Typing SVG](https://readme-typing-svg.herokuapp.com?font=Console&size=22&color=ffffff&background=000000&lines=>_+COMMAND+LINE+USAGE:)](https://git.io/typing-svg)
 Command | Result
 ------ | ------
-GSE_Generator.bat `-toast` | *test achievements*
-GSE_Generator.bat `-interfaces` | *create steam_interfaces.txt*
-GSE_Generator.bat `-emulator` | *download the latest release of goldberg_emulator fork by @otavepto*
-GSE_Generator.bat `-help` | *more information...*
+GSE_Generator.ps1 `-toast` | *test achievements*
+GSE_Generator.ps1 `-interfaces` | *create steam_interfaces.txt*
+GSE_Generator.ps1 `-emulator` | *download the latest release of goldberg_emulator fork by @otavepto*
+GSE_Generator.ps1 `-help` | *more information...*
 
 ***
 #### Notes
