@@ -6,7 +6,9 @@
 	&nbsp;<a href=""><img src="https://img.shields.io/badge/windows-10 / 11- ?logo=windows10&style=social" alt="" title="Windows"></a>
 </p>
 
-GSE_Generator.bat generates the "steam_settings" folder for the desired game with the following structure and contents:
+Requires flaresolverr in Tools\FlareSolverr directory.
+
+GSE_Generator.ps1 generates the "steam_settings" folder for the desired game with the following structure and contents:
 ``` text
 Game name/
  ├── steam_settings/
