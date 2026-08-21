@@ -6,7 +6,9 @@
 	&nbsp;<a href=""><img src="https://img.shields.io/badge/windows-10 / 11- ?logo=windows10&style=social" alt="" title="Windows"></a>
 </p>
 
-Requires flaresolverr in Tools\FlareSolverr directory.
+Fixed and fully adapted to powershell.
+
+Requires flaresolverr in Tools\FlareSolverr directory to deal with the cloudflare shenanigans.
 
 GSE_Generator.ps1 generates the "steam_settings" folder for the desired game with the following structure and contents:
 ``` text
