@@ -442,20 +442,16 @@ Function Confirm-Game {
 }
 
 Function Get-Dlcs {
-    Write-Host "`n  [ ] Searching downloadable content . . ." -ForegroundColor DarkGray
+    Write-Host "`n  [ ] Searching downloadable content on SteamDB . . ." -ForegroundColor DarkGray
     $settingsDir = Join-Path $global:HOME_DIR "$global:GameName\steam_settings"
     if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir | Out-Null }
     $configAppIni = Join-Path $settingsDir "configs.app.ini"
 
-    $dlcIds = @()
-    try {
-        $appDetails = Invoke-RestMethod -Uri "https://store.steampowered.com/api/appdetails/?filters=basic&appids=$global:GameAppID"
-        if ($appDetails."$global:GameAppID".success -and $appDetails."$global:GameAppID".data.dlc) {
-            $dlcIds = $appDetails."$global:GameAppID".data.dlc
-        }
-    } catch {}
-
-    if ($dlcIds.Count -eq 0) {
+    $html = Invoke-FlareSolverr -Url "https://steamdb.info/app/$global:GameAppID/dlc/"
+    
+    $dlcRows = [regex]::Matches($html, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
+    
+    if ($dlcRows.Count -eq 0) {
         Write-Host "  [x] No DLCs found." -ForegroundColor Green
         return
     }
@@ -465,22 +461,37 @@ Function Get-Dlcs {
     $iniContent += "unlock_all=0"
 
     $count = 0
-    $total = $dlcIds.Count
-    foreach ($dlcId in $dlcIds) {
+    $total = $dlcRows.Count
+    foreach ($row in $dlcRows) {
         $count++
-        $appName = "Unknown"
+        $dlcId = $row.Groups[1].Value
+        $rowInnerHtml = $row.Groups[2].Value
+        $appName = $dlcId 
 
-        try {
-            $dlcDetails = Invoke-RestMethod -Uri "https://store.steampowered.com/api/appdetails/?filters=basic&appids=$dlcId" -TimeoutSec 5
-            if ($dlcDetails."$dlcId".success) {
-                $appName = $dlcDetails."$dlcId".data.name
+        # 1. Try parsing table cells (<td>) directly to find text containing letters
+        $cells = [regex]::Matches($rowInnerHtml, '(?i)<td[^>]*>([\s\S]*?)</td>')
+        foreach ($cell in $cells) {
+            $cellText = $cell.Groups[1].Value -replace '<[^>]+>', ''
+            $cellText = [System.Net.WebUtility]::HtmlDecode($cellText).Trim()
+            
+            # Ensure it's not empty, not just the app ID, and actually contains text/letters
+            if (-not [string]::IsNullOrWhiteSpace($cellText) -and $cellText -ne $dlcId -and $cellText -match '[a-zA-Z]') {
+                $appName = $cellText
+                break
             }
-        } catch {}
+        }
 
-        if ($appName -eq "Unknown") {
-            $html = Invoke-FlareSolverr -Url "https://steamdb.info/app/$dlcId/"
-            if ($html -match '<h1 itemprop="name">(.*?)</h1>') {
-                $appName = ($matches[1] -replace '<[^>]+>', '').Trim()
+        # 2. Fallback to anchor check if cell parsing didn't catch a valid name
+        if ($appName -eq $dlcId) {
+            $anchors = [regex]::Matches($rowInnerHtml, '(?i)<a[^>]*>([\s\S]*?)</a>')
+            foreach ($a in $anchors) {
+                $cleanText = $a.Groups[1].Value -replace '<[^>]+>', ''
+                $cleanText = [System.Net.WebUtility]::HtmlDecode($cleanText).Trim()
+                
+                if ($cleanText -ne $dlcId -and -not [string]::IsNullOrWhiteSpace($cleanText)) {
+                    $appName = $cleanText
+                    break
+                }
             }
         }
 
