@@ -355,6 +355,7 @@ Function Search-Game {
             
             $appRows = [regex]::Matches($dbSearchHtml, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
             $firstAppId = $null
+            $partialMatchAppId = $null
             
             foreach ($row in $appRows) {
                 $appId = $row.Groups[1].Value
@@ -367,14 +368,23 @@ Function Search-Game {
                     $appName = ($anchor.Groups[1].Value -replace '<[^>]+>', '').Trim()
                     $appName = [System.Net.WebUtility]::HtmlDecode($appName)
                     
-                    if ($appName -eq $Query) {
+                    $cleanAppName = $appName -replace '™|®|©', ''
+                    
+                    if ($appName -eq $Query -or $cleanAppName -eq $Query) {
                         $GameAppID = $appId
                         break
+                    }
+                    
+                    if (-not $partialMatchAppId -and $cleanAppName -match "(?i)\b$([regex]::Escape($Query))\b") {
+                        $partialMatchAppId = $appId
                     }
                 }
                 if ($GameAppID) { break }
             }
             
+            if (-not $GameAppID -and $partialMatchAppId) {
+                $GameAppID = $partialMatchAppId
+            }
             if (-not $GameAppID -and $firstAppId) {
                 $GameAppID = $firstAppId
             }
@@ -419,11 +429,12 @@ Function Search-Game {
 
 Function Confirm-Game {
     $imgFile = Join-Path $global:HOME_DIR "$global:GameAppID.jpg"
-    Invoke-WebRequest -Uri "https://cdn.akamai.steamstatic.com/steam/apps/$global:GameAppID/header.jpg" -OutFile $imgFile -ErrorAction SilentlyContinue
+    try {
+        Invoke-WebRequest -Uri "https://cdn.akamai.steamstatic.com/steam/apps/$global:GameAppID/header.jpg" -OutFile $imgFile -ErrorAction Stop
+    } catch {
+        # Ignore 404 or other errors to continue displaying the confirmation UI
+    }
 
-    if (-not (Test-Path $imgFile)) { return $true }
-
-    $img = [System.Drawing.Image]::FromFile($imgFile)
     $form = New-Object Windows.Forms.Form -Property @{
         StartPosition = [Windows.Forms.FormStartPosition]::CenterScreen
         FormBorderStyle = [Windows.Forms.FormBorderStyle]::FixedDialog
@@ -439,8 +450,15 @@ Function Confirm-Game {
     $form.Controls.Add((New-Object Windows.Forms.Label -Property @{ Location = New-Object Drawing.Point(10, 5); Size = New-Object Drawing.Size(500, 20); Text = 'Found this game:' }))
     $form.Controls.Add((New-Object Windows.Forms.Label -Property @{ Location = New-Object Drawing.Point(10, 25); Size = New-Object Drawing.Size(500, 20); ForeColor = 'Gold'; Text = $global:GameNameShow; Font = New-Object System.Drawing.Font('Consolas', 13, [System.Drawing.FontStyle]::Bold) }))
     
-    $pic = New-Object Windows.Forms.PictureBox -Property @{ Location = New-Object Drawing.Point(12, 55); Size = New-Object Drawing.Size(460, 215); Image = $img; SizeMode = 'StretchImage' }
-    $form.Controls.Add($pic)
+    $hasImg = Test-Path $imgFile
+    if ($hasImg) {
+        $img = [System.Drawing.Image]::FromFile($imgFile)
+        $pic = New-Object Windows.Forms.PictureBox -Property @{ Location = New-Object Drawing.Point(12, 55); Size = New-Object Drawing.Size(460, 215); Image = $img; SizeMode = 'StretchImage' }
+        $form.Controls.Add($pic)
+    } else {
+        $noImgLbl = New-Object Windows.Forms.Label -Property @{ Location = New-Object Drawing.Point(12, 140); Size = New-Object Drawing.Size(460, 20); Text = '(No header image available)'; ForeColor = 'Gray'; TextAlign = 'MiddleCenter' }
+        $form.Controls.Add($noImgLbl)
+    }
 
     $form.Controls.Add((New-Object Windows.Forms.Label -Property @{ Location = New-Object Drawing.Point(10, 280); Size = New-Object Drawing.Size(500, 20); Text = 'Do you want to continue?' }))
 
@@ -451,17 +469,20 @@ Function Confirm-Game {
     $form.Controls.Add($btnNo)
 
     $res = $form.ShowDialog()
-    $img.Dispose()
+    
+    if ($hasImg) {
+        $img.Dispose()
+    }
     
     if ($res -eq [Windows.Forms.DialogResult]::Yes) {
         $settingsDir = Join-Path $global:HOME_DIR "$global:GameName\steam_settings"
         if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir | Out-Null }
-        Move-Item -Path $imgFile -Destination $settingsDir -Force
+        if ($hasImg) { Move-Item -Path $imgFile -Destination $settingsDir -Force }
         Set-Content -Path (Join-Path $settingsDir "steam_appid.txt") -Value $global:GameAppID
         Write-Host "  [x] Done!" -ForegroundColor Green
         return $true
     } else {
-        Remove-Item -Path $imgFile -Force
+        if ($hasImg) { Remove-Item -Path $imgFile -Force }
         Write-Host "    CANCELED " -ForegroundColor Red
         Start-Sleep -Seconds 3
         return $false
