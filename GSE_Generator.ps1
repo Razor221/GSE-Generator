@@ -676,10 +676,33 @@ Function Get-Achievements {
     $imgDir = Join-Path $settingsDir "images"
     $langFile = Join-Path $settingsDir "supported_languages.txt"
     
-    $apiKeyFile = Join-Path $global:HOME_DIR "key.txt"
+    $secureKeyFile = Join-Path $global:HOME_DIR "steam_api_key.clixml"
+    $plainKeyFile = Join-Path $global:HOME_DIR "key.txt"
     $apiKey = $null
-    if (Test-Path $apiKeyFile) {
-        $apiKey = (Get-Content $apiKeyFile).Trim()
+
+    if (Test-Path $secureKeyFile) {
+        try {
+            $secureString = Import-Clixml -Path $secureKeyFile
+            $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureString)
+            $apiKey = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($ptr)
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+        } catch {
+            Write-Host "  [-] Failed to decrypt secure API key. It may have been created on another machine or user account." -ForegroundColor Yellow
+        }
+    }
+
+    if (-not $apiKey -and (Test-Path $plainKeyFile)) {
+        $apiKey = (Get-Content $plainKeyFile).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($apiKey)) {
+            try {
+                $secureString = ConvertTo-SecureString $apiKey -AsPlainText -Force
+                $secureString | Export-Clixml -Path $secureKeyFile
+                Remove-Item $plainKeyFile -Force
+                Write-Host "  [i] Automatically encrypted key.txt into secure steam_api_key.clixml and deleted the plain-text file." -ForegroundColor Cyan
+            } catch {
+                Write-Host "  [-] Failed to encrypt API key." -ForegroundColor Yellow
+            }
+        }
     }
     
     $htaAch = Join-Path $global:HOME_DIR "Tools\GSE_achievements_language.hta"
@@ -778,7 +801,7 @@ Function Get-Achievements {
             Write-Host "  [-] Steam API failed or rejected key. Falling back to SteamDB..." -ForegroundColor Yellow
         }
     } else {
-        Write-Host "  [-] No valid API key found in key.txt. Using SteamDB..." -ForegroundColor Yellow
+        Write-Host "  [-] No valid API key found. Using SteamDB..." -ForegroundColor Yellow
     }
 
     if (-not $apiSuccess) {
