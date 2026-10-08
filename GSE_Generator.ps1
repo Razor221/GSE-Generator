@@ -615,6 +615,20 @@ Function Get-Achievements {
             $apiUrl = "https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key=$apiKey&appid=$global:GameAppID&l=$achLanguage"
             $schema = Invoke-RestMethod -Uri $apiUrl -ErrorAction Stop
             
+            if ($schema.game.availableGameStats.stats) {
+                $statsTxtPath = Join-Path $settingsDir "stats.txt"
+                $statsContent = @()
+                foreach ($stat in $schema.game.availableGameStats.stats) {
+                    $type = "int"
+                    if ($stat.defaultvalue -is [double] -or $stat.defaultvalue -match "\.") {
+                        $type = "float"
+                    }
+                    $statsContent += "$($stat.name)=$type=$($stat.defaultvalue)"
+                }
+                $statsContent | Out-File -FilePath $statsTxtPath -Encoding UTF8
+                Write-Host "  [x] Stats generated with $($statsContent.Count) stats in stats.txt!" -ForegroundColor Green
+            }
+            
             if ($schema.game.availableGameStats.achievements) {
                 if (-not (Test-Path $imgDir)) { New-Item -ItemType Directory -Path $imgDir | Out-Null }
                 
