@@ -352,7 +352,31 @@ Function Search-Game {
         if (-not $GameAppID) {
             $encodedQuery = [uri]::EscapeDataString($Query)
             $dbSearchHtml = Invoke-FlareSolverr -Url "https://steamdb.info/search/?a=app&q=$encodedQuery&type=1&category=0"
-            if ($dbSearchHtml -match 'href="/app/(\d+)/"') {
+            
+            $appRows = [regex]::Matches($dbSearchHtml, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
+            $firstAppId = $null
+            
+            foreach ($row in $appRows) {
+                $appId = $row.Groups[1].Value
+                if (-not $firstAppId) { $firstAppId = $appId }
+                
+                $innerHtml = $row.Groups[2].Value
+                if ($innerHtml -match '(?i)<a[^>]*href="/app/\d+/"[^>]*>([\s\S]*?)</a>') {
+                    $appName = ($matches[1] -replace '<[^>]+>', '').Trim()
+                    $appName = [System.Net.WebUtility]::HtmlDecode($appName)
+                    
+                    if ($appName -eq $Query) {
+                        $GameAppID = $appId
+                        break
+                    }
+                }
+            }
+            
+            if (-not $GameAppID -and $firstAppId) {
+                $GameAppID = $firstAppId
+            }
+            
+            if (-not $GameAppID -and $dbSearchHtml -match 'href="/app/(\d+)/"') {
                 $GameAppID = $matches[1]
             }
         }
