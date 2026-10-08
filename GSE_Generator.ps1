@@ -442,65 +442,97 @@ Function Confirm-Game {
 }
 
 Function Get-Dlcs {
-    Write-Host "`n  [ ] Searching downloadable content on SteamDB . . ." -ForegroundColor DarkGray
+    Write-Host "`n  [ ] Searching downloadable content . . ." -ForegroundColor DarkGray
     $settingsDir = Join-Path $global:HOME_DIR "$global:GameName\steam_settings"
     if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir | Out-Null }
     $configAppIni = Join-Path $settingsDir "configs.app.ini"
 
-    $html = Invoke-FlareSolverr -Url "https://steamdb.info/app/$global:GameAppID/dlc/"
-    
-    $dlcRows = [regex]::Matches($html, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
-    
-    if ($dlcRows.Count -eq 0) {
-        Write-Host "  [x] No DLCs found." -ForegroundColor Green
-        return
-    }
-
     $iniContent = @()
     $iniContent += "[app::dlcs]"
     $iniContent += "unlock_all=0"
+    $dlcFound = $false
 
-    $count = 0
-    $total = $dlcRows.Count
-    foreach ($row in $dlcRows) {
-        $count++
-        $dlcId = $row.Groups[1].Value
-        $rowInnerHtml = $row.Groups[2].Value
-        $appName = $dlcId 
-
-        # 1. Try parsing table cells (<td>) directly to find text containing letters
-        $cells = [regex]::Matches($rowInnerHtml, '(?i)<td[^>]*>([\s\S]*?)</td>')
-        foreach ($cell in $cells) {
-            $cellText = $cell.Groups[1].Value -replace '<[^>]+>', ''
-            $cellText = [System.Net.WebUtility]::HtmlDecode($cellText).Trim()
-            
-            # Ensure it's not empty, not just the app ID, and actually contains text/letters
-            if (-not [string]::IsNullOrWhiteSpace($cellText) -and $cellText -ne $dlcId -and $cellText -match '[a-zA-Z]') {
-                $appName = $cellText
-                break
-            }
-        }
-
-        # 2. Fallback to anchor check if cell parsing didn't catch a valid name
-        if ($appName -eq $dlcId) {
-            $anchors = [regex]::Matches($rowInnerHtml, '(?i)<a[^>]*>([\s\S]*?)</a>')
-            foreach ($a in $anchors) {
-                $cleanText = $a.Groups[1].Value -replace '<[^>]+>', ''
-                $cleanText = [System.Net.WebUtility]::HtmlDecode($cleanText).Trim()
+    # Try Steam API first
+    try {
+        $appDetails = Invoke-RestMethod -Uri "https://store.steampowered.com/api/appdetails/?filters=basic&appids=$global:GameAppID" -TimeoutSec 5
+        if ($appDetails."$global:GameAppID".success -and $appDetails."$global:GameAppID".data.dlc) {
+            $dlcList = $appDetails."$global:GameAppID".data.dlc
+            $count = 0
+            $total = $dlcList.Count
+            if ($total -gt 0) {
+                $dlcFound = $true
+                $appListMap = @{}
+                try {
+                    $appListRes = Invoke-RestMethod -Uri "https://api.steampowered.com/ISteamApps/GetAppList/v2/" -TimeoutSec 10
+                    foreach ($app in $appListRes.applist.apps) {
+                        $appListMap[$app.appid.ToString()] = $app.name
+                    }
+                } catch {}
                 
-                if ($cleanText -ne $dlcId -and -not [string]::IsNullOrWhiteSpace($cleanText)) {
-                    $appName = $cleanText
-                    break
+                foreach ($dlcId in $dlcList) {
+                    $count++
+                    $appName = $dlcId
+                    if ($appListMap.ContainsKey($dlcId.ToString())) {
+                        $appName = $appListMap[$dlcId.ToString()]
+                    }
+                    
+                    Write-Host "  [$count/$total]  $dlcId  =  $appName" -ForegroundColor Green
+                    $iniContent += "$dlcId=$appName"
                 }
             }
         }
-
-        Write-Host "  [$count/$total]  $dlcId  =  $appName" -ForegroundColor Green
-        $iniContent += "$dlcId=$appName"
+    } catch {
+        Write-Host "  [-] Steam API failed. Falling back to SteamDB..." -ForegroundColor Yellow
     }
 
-    $iniContent | Out-File -FilePath $configAppIni -Encoding UTF8
-    Write-Host "  [x] Done!" -ForegroundColor Green
+    if (-not $dlcFound) {
+        $html = Invoke-FlareSolverr -Url "https://steamdb.info/app/$global:GameAppID/dlc/"
+        $dlcRows = [regex]::Matches($html, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
+        
+        if ($dlcRows.Count -gt 0) {
+            $count = 0
+            $total = $dlcRows.Count
+            foreach ($row in $dlcRows) {
+                $count++
+                $dlcId = $row.Groups[1].Value
+                $rowInnerHtml = $row.Groups[2].Value
+                $appName = $dlcId 
+
+                $cells = [regex]::Matches($rowInnerHtml, '(?i)<td[^>]*>([\s\S]*?)</td>')
+                foreach ($cell in $cells) {
+                    $cellText = $cell.Groups[1].Value -replace '<[^>]+>', ''
+                    $cellText = [System.Net.WebUtility]::HtmlDecode($cellText).Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($cellText) -and $cellText -ne $dlcId -and $cellText -match '[a-zA-Z]') {
+                        $appName = $cellText
+                        break
+                    }
+                }
+
+                if ($appName -eq $dlcId) {
+                    $anchors = [regex]::Matches($rowInnerHtml, '(?i)<a[^>]*>([\s\S]*?)</a>')
+                    foreach ($a in $anchors) {
+                        $cleanText = $a.Groups[1].Value -replace '<[^>]+>', ''
+                        $cleanText = [System.Net.WebUtility]::HtmlDecode($cleanText).Trim()
+                        if ($cleanText -ne $dlcId -and -not [string]::IsNullOrWhiteSpace($cleanText)) {
+                            $appName = $cleanText
+                            break
+                        }
+                    }
+                }
+
+                Write-Host "  [$count/$total]  $dlcId  =  $appName" -ForegroundColor Green
+                $iniContent += "$dlcId=$appName"
+                $dlcFound = $true
+            }
+        }
+    }
+
+    if ($dlcFound) {
+        $iniContent | Out-File -FilePath $configAppIni -Encoding UTF8
+        Write-Host "  [x] Done!" -ForegroundColor Green
+    } else {
+        Write-Host "  [x] No DLCs found." -ForegroundColor Green
+    }
 }
 
 Function Get-UserConfigs {
@@ -552,6 +584,12 @@ Function Get-Achievements {
     $imgDir = Join-Path $settingsDir "images"
     $langFile = Join-Path $settingsDir "supported_languages.txt"
     
+    $apiKeyFile = Join-Path $global:HOME_DIR "key.txt"
+    $apiKey = $null
+    if (Test-Path $apiKeyFile) {
+        $apiKey = (Get-Content $apiKeyFile).Trim()
+    }
+    
     $htaAch = Join-Path $global:HOME_DIR "Tools\GSE_achievements_language.hta"
     $achLanguage = "en"
     $forceFix = $false
@@ -568,97 +606,162 @@ Function Get-Achievements {
         }
     }
 
-    $dbHtml = Invoke-FlareSolverr -Url "https://steamdb.info/app/$global:GameAppID/stats/"
-    if (-not $dbHtml) {
-        Write-Host "  [-] No achievements found on SteamDB." -ForegroundColor Yellow
-        return
-    }
-
-    $steamHtml = ""
-    if (-not $forceFix) {
-        try {
-            $steamHtml = (Invoke-WebRequest -Uri "https://steamcommunity.com/stats/$global:GameAppID/achievements/" -Headers @{ "Accept-Language" = $achLanguage } -UseBasicParsing).Content
-        } catch {}
-    }
-
-    $blocks = $dbHtml -split '<div class="achievement"'
-    if ($blocks.Count -le 1) {
-        Write-Host "  [x] No achievements." -ForegroundColor Green
-        return
-    }
-
-    if (-not (Test-Path $imgDir)) { New-Item -ItemType Directory -Path $imgDir | Out-Null }
-    
     $achievementsObj = @()
-    $count = 0
-    $total = $blocks.Count - 1
+    $apiSuccess = $false
     $cdnBaseUrl = "https://cdn.akamai.steamstatic.com/steamcommunity/public/images/apps/$global:GameAppID/"
 
-    foreach ($b in ($blocks | Select-Object -Skip 1)) {
-        if ($b -match 'id="achievement-([^"]+)"') {
-            $count++
-            $apiName = $matches[1]
-            $name = ""
-            $desc = ""
-            $iconUrl = ""
-            $grayUrl = ""
-
-            if ($b -match '<div class="achievement_name">([\s\S]*?)</div>') {
-                $name = $matches[1] -replace '<[^>]+>', ''
-                $name = $name.Trim() -replace '&quot;', '"' -replace '&amp;', '&' -replace '&#39;', "'"
-            }
-            if ($b -match '<div class="achievement_desc">([\s\S]*?)</div>') {
-                $desc = $matches[1] -replace '<[^>]+>', ''
-                $desc = $desc.Trim() -replace '&quot;', '"' -replace '&amp;', '&' -replace '&#39;', "'"
-            }
-
-            $imgs = [regex]::Matches($b, 'data-name="([^"]+\.jpg)"')
-            if ($imgs.Count -ge 2) {
-                $grayUrl = $imgs[0].Groups[1].Value
-                $iconUrl = $imgs[1].Groups[1].Value
-            } elseif ($imgs.Count -eq 1) {
-                $grayUrl = $imgs[0].Groups[1].Value
-                $iconUrl = $grayUrl
-            }
-
-            $isHidden = [bool]($b -match 'text-muted|achievement_hidden')
-            $iconName = ($iconUrl -split '/')[-1]
-            $grayName = ($grayUrl -split '/')[-1]
-
-            $finalName = $name
-            $finalDesc = $desc
+    if ($apiKey) {
+        try {
+            $apiUrl = "https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key=$apiKey&appid=$global:GameAppID&l=$achLanguage"
+            $schema = Invoke-RestMethod -Uri $apiUrl -ErrorAction Stop
             
-            if (-not $forceFix -and $steamHtml -and $iconName) {
-                $escIcon = [regex]::Escape($iconName)
-                $locPattern = '(?s)' + $escIcon + '.*?<h3>(?<lname>[^<]+)</h3>\s*<h5[^>]*>(?<ldesc>[^<]*)</h5>'
-                if ($steamHtml -match $locPattern) {
-                    $finalName = $matches['lname'].Trim() -replace '&quot;', '"' -replace '&amp;', '&' -replace '&#39;', "'"
-                    $finalDesc = $matches['ldesc'].Trim() -replace '&quot;', '"' -replace '&amp;', '&' -replace '&#39;', "'"
-                }
-            }
+            if ($schema.game.availableGameStats.achievements) {
+                if (-not (Test-Path $imgDir)) { New-Item -ItemType Directory -Path $imgDir | Out-Null }
+                
+                $count = 0
+                $total = $schema.game.availableGameStats.achievements.Count
+                
+                foreach ($ach in $schema.game.availableGameStats.achievements) {
+                    $count++
+                    $finalName = $ach.displayName
+                    $finalDesc = $ach.description
+                    $iconUrl = $ach.icon
+                    $grayUrl = $ach.icongray
+                    $apiName = $ach.name
+                    $isHidden = [bool]($ach.hidden)
 
-            Write-Host "   [$count/$total]   $finalName" -ForegroundColor Green
+                    Write-Host "   [$count/$total]   $finalName" -ForegroundColor Green
 
-            if ($iconName) {
-                $iconDest = Join-Path $imgDir $iconName
-                if (-not (Test-Path $iconDest)) { 
-                    try { Invoke-WebRequest -Uri ($cdnBaseUrl + $iconName) -OutFile $iconDest -ErrorAction Stop } catch {} 
-                }
-            }
-            if ($grayName) {
-                $grayDest = Join-Path $imgDir $grayName
-                if (-not (Test-Path $grayDest)) { 
-                    try { Invoke-WebRequest -Uri ($cdnBaseUrl + $grayName) -OutFile $grayDest -ErrorAction Stop } catch {} 
-                }
-            }
+                    $iconName = ""
+                    $grayName = ""
+                    
+                    if ($iconUrl) {
+                        $iconName = ($iconUrl -split '/')[-1]
+                        $iconDest = Join-Path $imgDir $iconName
+                        if (-not (Test-Path $iconDest)) { 
+                            try { Invoke-WebRequest -Uri $iconUrl -OutFile $iconDest -ErrorAction Stop } catch {} 
+                        }
+                    }
+                    if ($grayUrl) {
+                        $grayName = ($grayUrl -split '/')[-1]
+                        $grayDest = Join-Path $imgDir $grayName
+                        if (-not (Test-Path $grayDest)) { 
+                            try { Invoke-WebRequest -Uri $grayUrl -OutFile $grayDest -ErrorAction Stop } catch {} 
+                        }
+                    }
 
-            $achievementsObj += [ordered]@{
-                description = $finalDesc
-                displayName = $finalName
-                hidden      = $isHidden
-                icon        = if ($iconName) { "images/$iconName" } else { "" }
-                icongray    = if ($grayName) { "images/$grayName" } else { "" }
-                name        = $apiName
+                    $achievementsObj += [ordered]@{
+                        description = if ($finalDesc) { $finalDesc } else { "" }
+                        displayName = if ($finalName) { $finalName } else { "" }
+                        hidden      = $isHidden
+                        icon        = if ($iconName) { "images/$iconName" } else { "" }
+                        icongray    = if ($grayName) { "images/$grayName" } else { "" }
+                        name        = $apiName
+                    }
+                }
+                $apiSuccess = $true
+            } elseif ($schema.game -and -not $schema.game.availableGameStats) {
+                Write-Host "  [x] No achievements." -ForegroundColor Green
+                return
+            }
+        } catch {
+            Write-Host "  [-] Steam API failed or rejected key. Falling back to SteamDB..." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  [-] No valid API key found in key.txt. Using SteamDB..." -ForegroundColor Yellow
+    }
+
+    if (-not $apiSuccess) {
+        $dbHtml = Invoke-FlareSolverr -Url "https://steamdb.info/app/$global:GameAppID/stats/"
+        if (-not $dbHtml) {
+            Write-Host "  [-] No achievements found on SteamDB." -ForegroundColor Yellow
+            return
+        }
+        
+        $steamHtml = ""
+        if (-not $forceFix) {
+            try {
+                $steamHtml = (Invoke-WebRequest -Uri "https://steamcommunity.com/stats/$global:GameAppID/achievements/" -Headers @{ "Accept-Language" = $achLanguage } -UseBasicParsing).Content
+            } catch {}
+        }
+        
+        $blocks = $dbHtml -split '<div class="achievement"'
+        if ($blocks.Count -le 1) {
+            Write-Host "  [x] No achievements." -ForegroundColor Green
+            return
+        }
+        
+        if (-not (Test-Path $imgDir)) { New-Item -ItemType Directory -Path $imgDir | Out-Null }
+        
+        $count = 0
+        $total = $blocks.Count - 1
+        
+        foreach ($b in ($blocks | Select-Object -Skip 1)) {
+            if ($b -match 'id="achievement-([^"]+)"') {
+                $count++
+                $apiName = $matches[1]
+                $name = ""
+                $desc = ""
+                $iconUrl = ""
+                $grayUrl = ""
+                
+                if ($b -match '<div class="achievement_name">([\s\S]*?)</div>') {
+                    $name = $matches[1] -replace '<[^>]+>', ''
+                    $name = $name.Trim() -replace '&quot;', '"' -replace '&amp;', '&' -replace '&#39;', "'"
+                }
+                if ($b -match '<div class="achievement_desc">([\s\S]*?)</div>') {
+                    $desc = $matches[1] -replace '<[^>]+>', ''
+                    $desc = $desc.Trim() -replace '&quot;', '"' -replace '&amp;', '&' -replace '&#39;', "'"
+                }
+                
+                $imgs = [regex]::Matches($b, 'data-name="([^"]+\.jpg)"')
+                if ($imgs.Count -ge 2) {
+                    $grayUrl = $imgs[0].Groups[1].Value
+                    $iconUrl = $imgs[1].Groups[1].Value
+                } elseif ($imgs.Count -eq 1) {
+                    $grayUrl = $imgs[0].Groups[1].Value
+                    $iconUrl = $grayUrl
+                }
+                
+                $isHidden = [bool]($b -match 'text-muted|achievement_hidden')
+                $iconName = ($iconUrl -split '/')[-1]
+                $grayName = ($grayUrl -split '/')[-1]
+                
+                $finalName = $name
+                $finalDesc = $desc
+                
+                if (-not $forceFix -and $steamHtml -and $iconName) {
+                    $escIcon = [regex]::Escape($iconName)
+                    $locPattern = '(?s)' + $escIcon + '.*?<h3>(?<lname>[^<]+)</h3>\s*<h5[^>]*>(?<ldesc>[^<]*)</h5>'
+                    if ($steamHtml -match $locPattern) {
+                        $finalName = $matches['lname'].Trim() -replace '&quot;', '"' -replace '&amp;', '&' -replace '&#39;', "'"
+                        $finalDesc = $matches['ldesc'].Trim() -replace '&quot;', '"' -replace '&amp;', '&' -replace '&#39;', "'"
+                    }
+                }
+                
+                Write-Host "   [$count/$total]   $finalName" -ForegroundColor Green
+                
+                if ($iconName) {
+                    $iconDest = Join-Path $imgDir $iconName
+                    if (-not (Test-Path $iconDest)) { 
+                        try { Invoke-WebRequest -Uri ($cdnBaseUrl + $iconName) -OutFile $iconDest -ErrorAction Stop } catch {} 
+                    }
+                }
+                if ($grayName) {
+                    $grayDest = Join-Path $imgDir $grayName
+                    if (-not (Test-Path $grayDest)) { 
+                        try { Invoke-WebRequest -Uri ($cdnBaseUrl + $grayName) -OutFile $grayDest -ErrorAction Stop } catch {} 
+                    }
+                }
+                
+                $achievementsObj += [ordered]@{
+                    description = $finalDesc
+                    displayName = $finalName
+                    hidden      = $isHidden
+                    icon        = if ($iconName) { "images/$iconName" } else { "" }
+                    icongray    = if ($grayName) { "images/$grayName" } else { "" }
+                    name        = $apiName
+                }
             }
         }
     }
