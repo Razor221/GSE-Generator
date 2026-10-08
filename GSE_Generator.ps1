@@ -361,8 +361,10 @@ Function Search-Game {
                 if (-not $firstAppId) { $firstAppId = $appId }
                 
                 $innerHtml = $row.Groups[2].Value
-                if ($innerHtml -match '(?i)<a[^>]*href="/app/\d+/"[^>]*>([\s\S]*?)</a>') {
-                    $appName = ($matches[1] -replace '<[^>]+>', '').Trim()
+                $anchors = [regex]::Matches($innerHtml, '(?i)<a[^>]*href="/app/\d+/"[^>]*>([\s\S]*?)</a>')
+                
+                foreach ($anchor in $anchors) {
+                    $appName = ($anchor.Groups[1].Value -replace '<[^>]+>', '').Trim()
                     $appName = [System.Net.WebUtility]::HtmlDecode($appName)
                     
                     if ($appName -eq $Query) {
@@ -370,6 +372,7 @@ Function Search-Game {
                         break
                     }
                 }
+                if ($GameAppID) { break }
             }
             
             if (-not $GameAppID -and $firstAppId) {
