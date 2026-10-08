@@ -616,17 +616,21 @@ Function Get-Achievements {
             $schema = Invoke-RestMethod -Uri $apiUrl -ErrorAction Stop
             
             if ($schema.game.availableGameStats.stats) {
-                $statsTxtPath = Join-Path $settingsDir "stats.txt"
-                $statsContent = @()
+                $statsJsonPath = Join-Path $settingsDir "stats.json"
+                $statsArray = @()
                 foreach ($stat in $schema.game.availableGameStats.stats) {
                     $type = "int"
                     if ($stat.defaultvalue -is [double] -or $stat.defaultvalue -match "\.") {
                         $type = "float"
                     }
-                    $statsContent += "$($stat.name)=$type=$($stat.defaultvalue)"
+                    $statsArray += [ordered]@{
+                        name = $stat.name
+                        type = $type
+                        defaultvalue = $stat.defaultvalue
+                    }
                 }
-                $statsContent | Out-File -FilePath $statsTxtPath -Encoding UTF8
-                Write-Host "  [x] Stats generated with $($statsContent.Count) stats in stats.txt!" -ForegroundColor Green
+                $statsArray | ConvertTo-Json -Depth 3 | Out-File -FilePath $statsJsonPath -Encoding UTF8
+                Write-Host "  [x] Stats generated with $($statsArray.Count) stats in stats.json!" -ForegroundColor Green
             }
             
             if ($schema.game.availableGameStats.achievements) {
