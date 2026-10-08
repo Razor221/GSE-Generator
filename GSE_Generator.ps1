@@ -343,8 +343,45 @@ Function Search-Game {
             $encodedQuery = [uri]::EscapeDataString($Query)
             $searchRes = Invoke-RestMethod -Uri "https://store.steampowered.com/api/storesearch/?term=$encodedQuery&l=english&cc=US" -TimeoutSec 5
             if ($searchRes.total -gt 0) {
-                $GameAppID = $searchRes.items[0].id
-                $GameName = $searchRes.items[0].name
+                $exactMatch = $null
+                $normalizedMatch = $null
+                $wordMatch = $null
+                $containsMatch = $null
+                
+                $normalizedQuery = $Query -replace '[^a-zA-Z0-9]', ''
+                if (-not $normalizedQuery) { $normalizedQuery = $Query }
+
+                foreach ($item in $searchRes.items) {
+                    $appName = $item.name
+                    $appId = $item.id
+                    
+                    $cleanAppName = $appName -replace '[™®©]', ''
+                    $normalizedAppName = $appName -replace '[^a-zA-Z0-9]', ''
+                    
+                    if (-not $exactMatch -and ($appName -eq $Query -or $cleanAppName -eq $Query)) {
+                        $exactMatch = $item
+                    }
+                    if (-not $normalizedMatch -and ($normalizedAppName -eq $normalizedQuery)) {
+                        $normalizedMatch = $item
+                    }
+                    if (-not $wordMatch -and ($cleanAppName -match "(?i)\b$([regex]::Escape($Query))\b")) {
+                        $wordMatch = $item
+                    }
+                    if (-not $containsMatch -and ($normalizedAppName -match "(?i)$([regex]::Escape($normalizedQuery))")) {
+                        $containsMatch = $item
+                    }
+                }
+
+                $bestMatch = $null
+                if ($exactMatch) { $bestMatch = $exactMatch }
+                elseif ($normalizedMatch) { $bestMatch = $normalizedMatch }
+                elseif ($wordMatch) { $bestMatch = $wordMatch }
+                elseif ($containsMatch) { $bestMatch = $containsMatch }
+                
+                if ($bestMatch) {
+                    $GameAppID = $bestMatch.id
+                    $GameName = $bestMatch.name
+                }
             }
         } catch {}
 
@@ -354,8 +391,15 @@ Function Search-Game {
             $dbSearchHtml = Invoke-FlareSolverr -Url "https://steamdb.info/search/?a=app&q=$encodedQuery&type=1&category=0"
             
             $appRows = [regex]::Matches($dbSearchHtml, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
+            
+            $exactMatchAppId = $null
+            $normalizedMatchAppId = $null
+            $wordMatchAppId = $null
+            $containsMatchAppId = $null
             $firstAppId = $null
-            $partialMatchAppId = $null
+            
+            $normalizedQuery = $Query -replace '[^a-zA-Z0-9]', ''
+            if (-not $normalizedQuery) { $normalizedQuery = $Query }
             
             foreach ($row in $appRows) {
                 $appId = $row.Groups[1].Value
@@ -368,30 +412,30 @@ Function Search-Game {
                     $appName = ($anchor.Groups[1].Value -replace '<[^>]+>', '').Trim()
                     $appName = [System.Net.WebUtility]::HtmlDecode($appName)
                     
-                    $cleanAppName = $appName -replace '™|®|©', ''
+                    $cleanAppName = $appName -replace '[™®©]', ''
+                    $normalizedAppName = $appName -replace '[^a-zA-Z0-9]', ''
                     
-                    if ($appName -eq $Query -or $cleanAppName -eq $Query) {
-                        $GameAppID = $appId
-                        break
+                    if (-not $exactMatchAppId -and ($appName -eq $Query -or $cleanAppName -eq $Query)) {
+                        $exactMatchAppId = $appId
                     }
-                    
-                    if (-not $partialMatchAppId -and $cleanAppName -match "(?i)\b$([regex]::Escape($Query))\b") {
-                        $partialMatchAppId = $appId
+                    if (-not $normalizedMatchAppId -and ($normalizedAppName -eq $normalizedQuery)) {
+                        $normalizedMatchAppId = $appId
+                    }
+                    if (-not $wordMatchAppId -and ($cleanAppName -match "(?i)\b$([regex]::Escape($Query))\b")) {
+                        $wordMatchAppId = $appId
+                    }
+                    if (-not $containsMatchAppId -and ($normalizedAppName -match "(?i)$([regex]::Escape($normalizedQuery))")) {
+                        $containsMatchAppId = $appId
                     }
                 }
-                if ($GameAppID) { break }
             }
             
-            if (-not $GameAppID -and $partialMatchAppId) {
-                $GameAppID = $partialMatchAppId
-            }
-            if (-not $GameAppID -and $firstAppId) {
-                $GameAppID = $firstAppId
-            }
-            
-            if (-not $GameAppID -and $dbSearchHtml -match 'href="/app/(\d+)/"') {
-                $GameAppID = $matches[1]
-            }
+            if ($exactMatchAppId) { $GameAppID = $exactMatchAppId }
+            elseif ($normalizedMatchAppId) { $GameAppID = $normalizedMatchAppId }
+            elseif ($wordMatchAppId) { $GameAppID = $wordMatchAppId }
+            elseif ($containsMatchAppId) { $GameAppID = $containsMatchAppId }
+            elseif ($firstAppId) { $GameAppID = $firstAppId }
+            elseif ($dbSearchHtml -match 'href="/app/(\d+)/"') { $GameAppID = $matches[1] }
         }
     }
 
