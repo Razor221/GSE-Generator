@@ -6,9 +6,13 @@
 	&nbsp;<a href=""><img src="https://img.shields.io/badge/windows-10 / 11- ?logo=windows10&style=social" alt="" title="Windows"></a>
 </p>
 
-Fixed and fully adapted to powershell.
+Fixed and fully adapted to PowerShell.
 
-Requires flaresolverr in Tools\FlareSolverr directory to deal with the cloudflare shenanigans.
+Requires FlareSolverr in the Tools\FlareSolverr directory to handle Cloudflare shenanigans.
+
+Now also requires a working steam api key in a text file called key.txt. On the first run, though, it converts and deletes that plain key file, encrypting it into an encrypted clixml file using DPAPI.
+
+Now the script mainly uses the official Steam store to search and collect game data and falls back to SteamDB only for delisted games. 
 
 GSE_Generator.ps1 generates the "steam_settings" folder for the desired game with the following structure and contents:
 ``` text
