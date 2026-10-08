@@ -351,7 +351,7 @@ Function Search-Game {
         # 2. If Steam Store search fails (e.g., delisted game), fallback to SteamDB search via FlareSolverr to get AppID only
         if (-not $GameAppID) {
             $encodedQuery = [uri]::EscapeDataString($Query)
-            $dbSearchHtml = Invoke-FlareSolverr -Url "https://steamdb.info/search/?q=$encodedQuery"
+            $dbSearchHtml = Invoke-FlareSolverr -Url "https://steamdb.info/search/?a=app&q=$encodedQuery&type=1&category=0"
             if ($dbSearchHtml -match 'href="/app/(\d+)/"') {
                 $GameAppID = $matches[1]
             }
@@ -369,7 +369,7 @@ Function Search-Game {
 
         if (-not $GameName) {
             $html = Invoke-FlareSolverr -Url "https://steamdb.info/app/$GameAppID/"
-            if ($html -match '<h1 itemprop="name">(.*?)</h1>') {
+            if ($html -match '(?i)<h1[^>]*itemprop="name"[^>]*>(.*?)</h1>') {
                 $GameName = ($matches[1] -replace '<[^>]+>', '').Trim()
             }
         }
