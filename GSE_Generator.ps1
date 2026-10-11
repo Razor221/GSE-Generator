@@ -481,7 +481,7 @@ Function Search-Game {
 }
 
 Function Confirm-Game {
-    $imgFile = Join-Path $global:HOME_DIR "$global:GameAppID.jpg"
+    $imgFile = Join-Path ([System.IO.Path]::GetTempPath()) "$global:GameAppID.jpg"
     try {
         Invoke-WebRequest -Uri "https://cdn.akamai.steamstatic.com/steam/apps/$global:GameAppID/header.jpg" -OutFile $imgFile -ErrorAction Stop
     } catch {
@@ -525,17 +525,16 @@ Function Confirm-Game {
     
     if ($hasImg) {
         $img.Dispose()
+        Remove-Item -Path $imgFile -Force -ErrorAction SilentlyContinue
     }
     
     if ($res -eq [Windows.Forms.DialogResult]::Yes) {
         $settingsDir = Join-Path $global:HOME_DIR "$global:GameName\steam_settings"
         if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir | Out-Null }
-        if ($hasImg) { Move-Item -Path $imgFile -Destination $settingsDir -Force }
         Set-Content -Path (Join-Path $settingsDir "steam_appid.txt") -Value $global:GameAppID
         Write-Host "  [x] Done!" -ForegroundColor Green
         return $true
     } else {
-        if ($hasImg) { Remove-Item -Path $imgFile -Force }
         Write-Host "    CANCELED " -ForegroundColor Red
         Start-Sleep -Seconds 3
         return $false

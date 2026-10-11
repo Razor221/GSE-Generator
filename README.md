@@ -23,7 +23,6 @@ Game name/
  │    │    └── ...
  │    ├── sounds/
  │    │    └── overlay_achievement_notification.wav
- │    ├── header image
  │    ├── achievements.json
  │    ├── configs.app.ini
  │    ├── configs.overlay.ini
