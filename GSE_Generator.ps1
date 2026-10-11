@@ -552,41 +552,48 @@ Function Get-Dlcs {
     $iniContent += "[app::dlcs]"
     $iniContent += "unlock_all=0"
     $dlcFound = $false
+    $steamApiSuccess = $false
 
     # Try Steam API first
     try {
         $appDetails = Invoke-RestMethod -Uri "https://store.steampowered.com/api/appdetails/?filters=basic&appids=$global:GameAppID" -TimeoutSec 5
-        if ($appDetails."$global:GameAppID".success -and $appDetails."$global:GameAppID".data.dlc) {
-            $dlcList = $appDetails."$global:GameAppID".data.dlc
-            $count = 0
-            $total = $dlcList.Count
-            if ($total -gt 0) {
-                $dlcFound = $true
-                $appListMap = @{}
-                try {
-                    $appListRes = Invoke-RestMethod -Uri "https://api.steampowered.com/ISteamApps/GetAppList/v2/" -TimeoutSec 10
-                    foreach ($app in $appListRes.applist.apps) {
-                        $appListMap[$app.appid.ToString()] = $app.name
-                    }
-                } catch {}
-                
-                foreach ($dlcId in $dlcList) {
-                    $count++
-                    $appName = $dlcId
-                    if ($appListMap.ContainsKey($dlcId.ToString())) {
-                        $appName = $appListMap[$dlcId.ToString()]
-                    }
+        if ($appDetails -and $appDetails."$global:GameAppID" -and $appDetails."$global:GameAppID".success) {
+            $steamApiSuccess = $true
+            if ($appDetails."$global:GameAppID".data.dlc) {
+                $dlcList = $appDetails."$global:GameAppID".data.dlc
+                $count = 0
+                $total = $dlcList.Count
+                if ($total -gt 0) {
+                    $dlcFound = $true
+                    $appListMap = @{}
+                    try {
+                        $appListRes = Invoke-RestMethod -Uri "https://api.steampowered.com/ISteamApps/GetAppList/v2/" -TimeoutSec 10
+                        foreach ($app in $appListRes.applist.apps) {
+                            $appListMap[$app.appid.ToString()] = $app.name
+                        }
+                    } catch {}
                     
-                    Write-Host "  [$count/$total]  $dlcId  =  $appName" -ForegroundColor Green
-                    $iniContent += "$dlcId=$appName"
+                    foreach ($dlcId in $dlcList) {
+                        $count++
+                        $appName = $dlcId
+                        if ($appListMap.ContainsKey($dlcId.ToString())) {
+                            $appName = $appListMap[$dlcId.ToString()]
+                        }
+                        
+                        Write-Host "  [$count/$total]  $dlcId  =  $appName" -ForegroundColor Green
+                        $iniContent += "$dlcId=$appName"
+                    }
                 }
             }
+        } else {
+            Write-Host "  [-] Steam API failed. Falling back to SteamDB..." -ForegroundColor Yellow
         }
     } catch {
         Write-Host "  [-] Steam API failed. Falling back to SteamDB..." -ForegroundColor Yellow
     }
 
-    if (-not $dlcFound) {
+    # Only fall back to SteamDB if Steam API failed
+    if (-not $steamApiSuccess) {
         $html = Invoke-FlareSolverr -Url "https://steamdb.info/app/$global:GameAppID/dlc/"
         $dlcRows = [regex]::Matches($html, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
         
