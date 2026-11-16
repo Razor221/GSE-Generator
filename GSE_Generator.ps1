@@ -330,37 +330,113 @@ Function Show-SearchInput {
     return $null
 }
 
+Function Get-GameMatchTier {
+    param(
+        [string]$AppName,
+        [string]$Query
+    )
+
+    if ([string]::IsNullOrWhiteSpace($AppName) -or [string]::IsNullOrWhiteSpace($Query)) {
+        return 0
+    }
+
+    $cleanAppName = $AppName -replace '[™®©]', ''
+    $normalizedAppName = $AppName -replace '[^a-zA-Z0-9]', ''
+    $normalizedQuery = $Query -replace '[^a-zA-Z0-9]', ''
+    if (-not $normalizedQuery) { $normalizedQuery = $Query }
+
+    if ($AppName.ToLowerInvariant() -eq $Query.ToLowerInvariant() -or $cleanAppName.ToLowerInvariant() -eq $Query.ToLowerInvariant()) {
+        return 1
+    }
+    if ($normalizedAppName.ToLowerInvariant() -eq $normalizedQuery.ToLowerInvariant()) {
+        return 2
+    }
+    if ([regex]::IsMatch($cleanAppName, "\b$([regex]::Escape($Query))\b", "IgnoreCase, CultureInvariant")) {
+        return 3
+    }
+    if ([regex]::IsMatch($normalizedAppName, "$([regex]::Escape($normalizedQuery))", "IgnoreCase, CultureInvariant")) {
+        return 4
+    }
+
+    return 0
+}
+
 Function Get-SteamStoreResults {
     param([string]$Query)
 
     $results = @()
     $seenIds = @{}
 
-    try {
-        $encodedQuery = [uri]::EscapeDataString($Query)
-        $headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
-        $searchRes = Invoke-RestMethod -Uri "https://store.steampowered.com/api/storesearch/?term=$encodedQuery&l=english&cc=US" -Headers $headers -TimeoutSec 5
+    $encodedQuery = [uri]::EscapeDataString($Query)
+    $headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
 
-        if ($searchRes -and $searchRes.total -gt 0 -and $searchRes.items) {
-            foreach ($item in $searchRes.items) {
-                $appId = "$($item.id)".Trim()
-                $appName = "$($item.name)".Trim()
-                if (-not $appId -or -not $appName -or $seenIds.ContainsKey($appId)) {
-                    continue
-                }
-                $seenIds[$appId] = $true
-                $results += [PSCustomObject]@{
-                    Id   = $appId
-                    Name = $appName
+    $searchRes = $null
+    try {
+        $searchRes = Invoke-RestMethod -Uri "https://store.steampowered.com/api/storesearch/?term=$encodedQuery&l=english&cc=US" -Headers $headers -TimeoutSec 5
+    } catch {
+        Write-Host "  [-] Steam Store API search failed or timed out. Falling back to SteamDB..." -ForegroundColor Yellow
+        return $results
+    }
+
+    if (-not $searchRes -or $searchRes.total -le 0 -or -not $searchRes.items) {
+        Write-Host "  [-] Steam Store search returned 0 results. Falling back to SteamDB..." -ForegroundColor Yellow
+        return $results
+    }
+
+    $gamesRes = $null
+    try {
+        $gamesRes = Invoke-RestMethod -Uri "https://store.steampowered.com/search/results/?term=$encodedQuery&category1=998&l=english&cc=US&json=1" -Headers $headers -TimeoutSec 5
+    } catch {}
+
+    $gameIdSet = @{}
+    $gamesList = @()
+    $gamesListSeen = @{}
+    if ($gamesRes -and $gamesRes.items) {
+        foreach ($g in $gamesRes.items) {
+            if ($g.logo -match '/apps/(\d+)/') {
+                $gid = $matches[1]
+                $gname = [System.Net.WebUtility]::HtmlDecode("$($g.name)".Trim())
+                if ($gid -and $gname -and -not $gamesListSeen.ContainsKey($gid)) {
+                    $gamesListSeen[$gid] = $true
+                    $gameIdSet[$gid] = $true
+                    $gamesList += [PSCustomObject]@{
+                        Id   = $gid
+                        Name = $gname
+                    }
                 }
             }
         }
+    }
 
-        if ($results.Count -eq 0) {
-            Write-Host "  [-] Steam Store search returned 0 results. Falling back to SteamDB..." -ForegroundColor Yellow
+    # Pass 1: relevance-ordered storesearch matches filtered to Games (category1=998) and matching query name
+    foreach ($item in $searchRes.items) {
+        $appId = "$($item.id)".Trim()
+        $appName = "$($item.name)".Trim()
+        if (-not $appId -or -not $appName -or $seenIds.ContainsKey($appId)) {
+            continue
         }
-    } catch {
-        Write-Host "  [-] Steam Store API search failed or timed out. Falling back to SteamDB..." -ForegroundColor Yellow
+        if (($gameIdSet.Count -eq 0 -or $gameIdSet.ContainsKey($appId)) -and (Get-GameMatchTier -AppName $appName -Query $Query) -gt 0) {
+            $seenIds[$appId] = $true
+            $results += [PSCustomObject]@{
+                Id   = $appId
+                Name = $appName
+            }
+        }
+    }
+
+    # Pass 2: additional game matches beyond storesearch's 10-item cap
+    foreach ($g in $gamesList) {
+        if ($seenIds.ContainsKey($g.Id)) {
+            continue
+        }
+        if ((Get-GameMatchTier -AppName $g.Name -Query $Query) -gt 0) {
+            $seenIds[$g.Id] = $true
+            $results += $g
+        }
+    }
+
+    if ($results.Count -eq 0) {
+        Write-Host "  [-] Steam Store search returned results but none matched well. Falling back to SteamDB..." -ForegroundColor Yellow
     }
 
     return $results
@@ -369,13 +445,19 @@ Function Get-SteamStoreResults {
 Function Get-SteamDbResults {
     param([string]$Query)
 
-    $results = @()
+    $allResults = @()
+    $tierBuckets = @{
+        1 = @()
+        2 = @()
+        3 = @()
+        4 = @()
+    }
     $seenIds = @{}
     $encodedQuery = [uri]::EscapeDataString($Query)
     $dbSearchHtml = Invoke-FlareSolverr -Url "https://steamdb.info/search/?a=app&q=$encodedQuery&type=1&category=0"
 
     if ([string]::IsNullOrWhiteSpace($dbSearchHtml)) {
-        return $results
+        return $allResults
     }
 
     $appRows = [regex]::Matches($dbSearchHtml, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
@@ -401,9 +483,15 @@ Function Get-SteamDbResults {
 
         if ($appName) {
             $seenIds[$appId] = $true
-            $results += [PSCustomObject]@{
+            $entry = [PSCustomObject]@{
                 Id   = $appId
                 Name = $appName
+            }
+            $allResults += $entry
+
+            $tier = Get-GameMatchTier -AppName $appName -Query $Query
+            if ($tier -ge 1 -and $tier -le 4) {
+                $tierBuckets[$tier] += $entry
             }
         }
     }
@@ -413,15 +501,26 @@ Function Get-SteamDbResults {
         if ($dbSearchHtml -match '(?i)<h1[^>]*itemprop="name"[^>]*>([\s\S]*?)</h1>') {
             $fallbackName = [System.Net.WebUtility]::HtmlDecode(($matches[1] -replace '<[^>]+>', '').Trim())
             if (-not [string]::IsNullOrWhiteSpace($fallbackName)) {
-                $results += [PSCustomObject]@{
+                $entry = [PSCustomObject]@{
                     Id   = $fallbackId
                     Name = $fallbackName
+                }
+                $allResults += $entry
+
+                $tier = Get-GameMatchTier -AppName $fallbackName -Query $Query
+                if ($tier -ge 1 -and $tier -le 4) {
+                    $tierBuckets[$tier] += $entry
                 }
             }
         }
     }
 
-    return $results
+    $matchedResults = @($tierBuckets[1] + $tierBuckets[2] + $tierBuckets[3] + $tierBuckets[4])
+    if ($matchedResults.Count -gt 0) {
+        return $matchedResults
+    }
+
+    return $allResults
 }
 
 Function Search-Game {
