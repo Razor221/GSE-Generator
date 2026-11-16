@@ -104,14 +104,14 @@ Function Test-SteamApiFile {
 
     $isPE = $false
     $isCorrectName = $false
-    $apiBits = "x32"
+    $apiBits = "x86"
     $apiName = "steam_api"
 
     $output = & $7zExe l $FilePath
     foreach ($line in $output) {
         if ($line -match "Type\s+=\s+PE") { $isPE = $true }
         if ($line -match "Name\s+=\s+steam_api\.dll") { $isCorrectName = $true }
-        if ($line -match "CPU\s+=\s+x86") { $apiBits = "x32"; $apiName = "steam_api" }
+        if ($line -match "CPU\s+=\s+x86") { $apiBits = "x86"; $apiName = "steam_api" }
         if ($line -match "CPU\s+=\s+x64") { $apiBits = "x64"; $apiName = "steam_api64" }
     }
 
@@ -184,7 +184,7 @@ Function Invoke-GoldbergEmulatorFork {
         elseif ($ApiName -eq "steam_api64") { $changeNameBits = $true; $optApi = "32" }
     } elseif ($apiAnswer -eq 7) {
         if ($ApiName -eq "steam_api") { $ApiBits = "x64"; $ApiName = "steam_api64"; $optApi = "32" }
-        elseif ($ApiName -eq "steam_api64") { $ApiBits = "x32"; $ApiName = "steam_api"; $optApi = "64" }
+        elseif ($ApiName -eq "steam_api64") { $ApiBits = "x86"; $ApiName = "steam_api"; $optApi = "64" }
     }
 
     Write-Host "`n  [ ] Searching emulator . . ." -ForegroundColor DarkGray
@@ -227,7 +227,8 @@ Function Invoke-GoldbergEmulatorFork {
             Copy-Item -Path $FilePath -Destination (Join-Path $DestinationDir $oDllName) -Force
             $7zExe = Join-Path $global:HOME_DIR "Tools\7z\7z.exe"
             if (Test-Path $7zExe) {
-                & $7zExe e -y $backupZip "release\experimental\$ApiBits\$ApiName.dll" "-o$DestinationDir" | Out-Null
+                $backupBits = if ($ApiBits -eq "x86") { "x32" } else { $ApiBits }
+                & $7zExe e -y $backupZip "release\experimental\$backupBits\$ApiName.dll" "-o$DestinationDir" | Out-Null
             }
         }
     }
