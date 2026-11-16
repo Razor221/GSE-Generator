@@ -23,6 +23,9 @@ $global:TITLE = "Goldberg Steam Emulator Generator"
 $global:GameAppID = $null
 $global:GameName = $null
 $global:GameNameShow = $null
+$global:SearchResults = @()
+$global:LastSearchQuery = $null
+$global:SearchUsedSteamDb = $false
 
 # Load WinForms Assembly
 Add-Type -AssemblyName System.Windows.Forms
@@ -327,128 +330,115 @@ Function Show-SearchInput {
     return $null
 }
 
+Function Get-SteamStoreResults {
+    param([string]$Query)
+
+    $results = @()
+    $seenIds = @{}
+
+    try {
+        $encodedQuery = [uri]::EscapeDataString($Query)
+        $headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+        $searchRes = Invoke-RestMethod -Uri "https://store.steampowered.com/api/storesearch/?term=$encodedQuery&l=english&cc=US" -Headers $headers -TimeoutSec 5
+
+        if ($searchRes -and $searchRes.total -gt 0 -and $searchRes.items) {
+            foreach ($item in $searchRes.items) {
+                $appId = "$($item.id)".Trim()
+                $appName = "$($item.name)".Trim()
+                if (-not $appId -or -not $appName -or $seenIds.ContainsKey($appId)) {
+                    continue
+                }
+                $seenIds[$appId] = $true
+                $results += [PSCustomObject]@{
+                    Id   = $appId
+                    Name = $appName
+                }
+            }
+        }
+
+        if ($results.Count -eq 0) {
+            Write-Host "  [-] Steam Store search returned 0 results. Falling back to SteamDB..." -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "  [-] Steam Store API search failed or timed out. Falling back to SteamDB..." -ForegroundColor Yellow
+    }
+
+    return $results
+}
+
+Function Get-SteamDbResults {
+    param([string]$Query)
+
+    $results = @()
+    $seenIds = @{}
+    $encodedQuery = [uri]::EscapeDataString($Query)
+    $dbSearchHtml = Invoke-FlareSolverr -Url "https://steamdb.info/search/?a=app&q=$encodedQuery&type=1&category=0"
+
+    if ([string]::IsNullOrWhiteSpace($dbSearchHtml)) {
+        return $results
+    }
+
+    $appRows = [regex]::Matches($dbSearchHtml, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
+
+    foreach ($row in $appRows) {
+        $appId = $row.Groups[1].Value.Trim()
+        if (-not $appId -or $seenIds.ContainsKey($appId)) {
+            continue
+        }
+
+        $innerHtml = $row.Groups[2].Value
+        $anchors = [regex]::Matches($innerHtml, '(?i)<a[^>]*href="/app/\d+[^"]*"[^>]*>([\s\S]*?)</a>')
+        $appName = $null
+
+        foreach ($anchor in $anchors) {
+            $candidate = ($anchor.Groups[1].Value -replace '<[^>]+>', '').Trim()
+            $candidate = [System.Net.WebUtility]::HtmlDecode($candidate).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and $candidate -ne $appId) {
+                $appName = $candidate
+                break
+            }
+        }
+
+        if ($appName) {
+            $seenIds[$appId] = $true
+            $results += [PSCustomObject]@{
+                Id   = $appId
+                Name = $appName
+            }
+        }
+    }
+
+    if ($appRows.Count -eq 0 -and $dbSearchHtml -match '(?i)href="/app/(\d+)/"') {
+        $fallbackId = $matches[1]
+        if ($dbSearchHtml -match '(?i)<h1[^>]*itemprop="name"[^>]*>([\s\S]*?)</h1>') {
+            $fallbackName = [System.Net.WebUtility]::HtmlDecode(($matches[1] -replace '<[^>]+>', '').Trim())
+            if (-not [string]::IsNullOrWhiteSpace($fallbackName)) {
+                $results += [PSCustomObject]@{
+                    Id   = $fallbackId
+                    Name = $fallbackName
+                }
+            }
+        }
+    }
+
+    return $results
+}
+
 Function Search-Game {
     param([string]$Query)
     Write-Host "`n  [ ] Searching game . . ." -ForegroundColor DarkGray
 
-    $isNumeric = $Query -match '^\d+$'
-    $GameAppID = $null
-    $GameName = $null
+    $global:SearchResults = @()
+    $global:LastSearchQuery = $Query
+    $global:SearchUsedSteamDb = $false
+    $global:GameAppID = $null
+    $global:GameName = $null
+    $global:GameNameShow = $null
 
-    if ($isNumeric) {
+    if ($Query -match '^\d+$') {
         $GameAppID = $Query
-    } else {
-        # 1. Try official Steam Store Search first (fastest for active games)
-        try {
-            $encodedQuery = [uri]::EscapeDataString($Query)
-            $headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
-            $searchRes = Invoke-RestMethod -Uri "https://store.steampowered.com/api/storesearch/?term=$encodedQuery&l=english&cc=US" -Headers $headers -TimeoutSec 5
-            
-            if ($searchRes.total -gt 0) {
-                $exactMatch = $null
-                $normalizedMatch = $null
-                $wordMatch = $null
-                $containsMatch = $null
-                
-                $normalizedQuery = $Query -replace '[^a-zA-Z0-9]', ''
-                if (-not $normalizedQuery) { $normalizedQuery = $Query }
+        $GameName = $null
 
-                foreach ($item in $searchRes.items) {
-                    $appName = $item.name
-                    $appId = $item.id
-                    
-                    $cleanAppName = $appName -replace '[™®©]', ''
-                    $normalizedAppName = $appName -replace '[^a-zA-Z0-9]', ''
-                    
-                    if (-not $exactMatch -and ($appName.ToLowerInvariant() -eq $Query.ToLowerInvariant() -or $cleanAppName.ToLowerInvariant() -eq $Query.ToLowerInvariant())) {
-                        $exactMatch = $item
-                    }
-                    if (-not $normalizedMatch -and ($normalizedAppName.ToLowerInvariant() -eq $normalizedQuery.ToLowerInvariant())) {
-                        $normalizedMatch = $item
-                    }
-                    if (-not $wordMatch -and ([regex]::IsMatch($cleanAppName, "\b$([regex]::Escape($Query))\b", "IgnoreCase, CultureInvariant"))) {
-                        $wordMatch = $item
-                    }
-                    if (-not $containsMatch -and ([regex]::IsMatch($normalizedAppName, "$([regex]::Escape($normalizedQuery))", "IgnoreCase, CultureInvariant"))) {
-                        $containsMatch = $item
-                    }
-                }
-
-                $bestMatch = $null
-                if ($exactMatch) { $bestMatch = $exactMatch }
-                elseif ($normalizedMatch) { $bestMatch = $normalizedMatch }
-                elseif ($wordMatch) { $bestMatch = $wordMatch }
-                elseif ($containsMatch) { $bestMatch = $containsMatch }
-                
-                if ($bestMatch) {
-                    $GameAppID = $bestMatch.id
-                    $GameName = $bestMatch.name
-                } else {
-                    Write-Host "  [-] Steam Store search returned results but none matched well. Falling back to SteamDB..." -ForegroundColor Yellow
-                }
-            } else {
-                Write-Host "  [-] Steam Store search returned 0 results. Falling back to SteamDB..." -ForegroundColor Yellow
-            }
-        } catch {
-            Write-Host "  [-] Steam Store API search failed or timed out. Falling back to SteamDB..." -ForegroundColor Yellow
-        }
-
-        # 2. If Steam Store search fails (e.g., delisted game), fallback to SteamDB search via FlareSolverr to get AppID only
-        if (-not $GameAppID) {
-            $encodedQuery = [uri]::EscapeDataString($Query)
-            $dbSearchHtml = Invoke-FlareSolverr -Url "https://steamdb.info/search/?a=app&q=$encodedQuery&type=1&category=0"
-            
-            $appRows = [regex]::Matches($dbSearchHtml, '(?i)<tr[^>]*data-appid="(\d+)"[^>]*>([\s\S]*?)</tr>')
-            
-            $exactMatchAppId = $null
-            $normalizedMatchAppId = $null
-            $wordMatchAppId = $null
-            $containsMatchAppId = $null
-            $firstAppId = $null
-            
-            $normalizedQuery = $Query -replace '[^a-zA-Z0-9]', ''
-            if (-not $normalizedQuery) { $normalizedQuery = $Query }
-            
-            foreach ($row in $appRows) {
-                $appId = $row.Groups[1].Value
-                if (-not $firstAppId) { $firstAppId = $appId }
-                
-                $innerHtml = $row.Groups[2].Value
-                $anchors = [regex]::Matches($innerHtml, '(?i)<a[^>]*href="/app/\d+/"[^>]*>([\s\S]*?)</a>')
-                
-                foreach ($anchor in $anchors) {
-                    $appName = ($anchor.Groups[1].Value -replace '<[^>]+>', '').Trim()
-                    $appName = [System.Net.WebUtility]::HtmlDecode($appName)
-                    
-                    $cleanAppName = $appName -replace '[™®©]', ''
-                    $normalizedAppName = $appName -replace '[^a-zA-Z0-9]', ''
-                    
-                    if (-not $exactMatchAppId -and ($appName.ToLowerInvariant() -eq $Query.ToLowerInvariant() -or $cleanAppName.ToLowerInvariant() -eq $Query.ToLowerInvariant())) {
-                        $exactMatchAppId = $appId
-                    }
-                    if (-not $normalizedMatchAppId -and ($normalizedAppName.ToLowerInvariant() -eq $normalizedQuery.ToLowerInvariant())) {
-                        $normalizedMatchAppId = $appId
-                    }
-                    if (-not $wordMatchAppId -and ([regex]::IsMatch($cleanAppName, "\b$([regex]::Escape($Query))\b", "IgnoreCase, CultureInvariant"))) {
-                        $wordMatchAppId = $appId
-                    }
-                    if (-not $containsMatchAppId -and ([regex]::IsMatch($normalizedAppName, "$([regex]::Escape($normalizedQuery))", "IgnoreCase, CultureInvariant"))) {
-                        $containsMatchAppId = $appId
-                    }
-                }
-            }
-            
-            if ($exactMatchAppId) { $GameAppID = $exactMatchAppId }
-            elseif ($normalizedMatchAppId) { $GameAppID = $normalizedMatchAppId }
-            elseif ($wordMatchAppId) { $GameAppID = $wordMatchAppId }
-            elseif ($containsMatchAppId) { $GameAppID = $containsMatchAppId }
-            elseif ($firstAppId) { $GameAppID = $firstAppId }
-            elseif ($dbSearchHtml -match 'href="/app/(\d+)/"') { $GameAppID = $matches[1] }
-        }
-    }
-
-    # Once we have the GameAppID, fetch the official name cleanly from its SteamDB page or appdetails API
-    if ($GameAppID -and -not $GameName) {
         try {
             $headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
             $appDetails = Invoke-RestMethod -Uri "https://store.steampowered.com/api/appdetails/?filters=basic&appids=$GameAppID" -Headers $headers -TimeoutSec 5
@@ -459,76 +449,302 @@ Function Search-Game {
 
         if (-not $GameName) {
             $html = Invoke-FlareSolverr -Url "https://steamdb.info/app/$GameAppID/"
-            if ($html -match '(?i)<h1[^>]*itemprop="name"[^>]*>(.*?)</h1>') {
-                $GameName = ($matches[1] -replace '<[^>]+>', '').Trim()
+            if ($html -match '(?i)<h1[^>]*itemprop="name"[^>]*>([\s\S]*?)</h1>') {
+                $GameName = [System.Net.WebUtility]::HtmlDecode(($matches[1] -replace '<[^>]+>', '').Trim())
             }
         }
+
+        if ($GameName) {
+            $global:SearchResults = @([PSCustomObject]@{
+                Id   = "$GameAppID"
+                Name = $GameName.Trim()
+            })
+            $global:SearchUsedSteamDb = $true
+        }
+    } else {
+        $results = @(Get-SteamStoreResults -Query $Query)
+        if ($results.Count -eq 0) {
+            $results = @(Get-SteamDbResults -Query $Query)
+            $global:SearchUsedSteamDb = $true
+        }
+        $global:SearchResults = $results
     }
 
-    if (-not $GameName -or -not $GameAppID) {
+    if ($global:SearchResults.Count -eq 0) {
         Write-Host "    GAME NOT FOUND " -ForegroundColor Red
         Start-Sleep -Seconds 3
         return $false
     }
 
-    $GameName = $GameName.Trim()
-    $global:GameNameShow = $GameName
-    $global:GameAppID = $GameAppID
-    $global:GameName = "$GameName ($GameAppID)" -replace '[/:<>\\|?*]', ''
-    
-    Write-Host "    $($global:GameName)" -ForegroundColor DarkGray
     return $true
 }
 
 Function Confirm-Game {
-    $imgFile = Join-Path ([System.IO.Path]::GetTempPath()) "$global:GameAppID.jpg"
-    try {
-        Invoke-WebRequest -Uri "https://cdn.akamai.steamstatic.com/steam/apps/$global:GameAppID/header.jpg" -OutFile $imgFile -ErrorAction Stop
-    } catch {
-        # Ignore 404 or other errors to continue displaying the confirmation UI
+    if (-not $global:SearchResults -or $global:SearchResults.Count -eq 0) {
+        return $false
+    }
+
+    $uiState = @{
+        CurrentResults = @($global:SearchResults)
+        ImgCache       = @{}
+        ImageStreams   = [System.Collections.ArrayList]::new()
+        PendingAppId   = $null
     }
 
     $form = New-Object Windows.Forms.Form -Property @{
-        StartPosition = [Windows.Forms.FormStartPosition]::CenterScreen
+        StartPosition   = [Windows.Forms.FormStartPosition]::CenterScreen
         FormBorderStyle = [Windows.Forms.FormBorderStyle]::FixedDialog
-        ControlBox = $false
-        Size = New-Object Drawing.Size(500, 400)
-        ForeColor = 'White'
-        BackColor = '#282828'
-        Text = $global:TITLE
-        Topmost = $true
-        Font = New-Object System.Drawing.Font('Consolas', 13)
+        MaximizeBox     = $false
+        MinimizeBox     = $false
+        ControlBox      = $false
+        ClientSize      = New-Object Drawing.Size(494, 585)
+        ForeColor       = 'White'
+        BackColor       = '#282828'
+        Text            = $global:TITLE
+        Topmost         = $true
+        Font            = New-Object System.Drawing.Font('Consolas', 13)
     }
 
-    $form.Controls.Add((New-Object Windows.Forms.Label -Property @{ Location = New-Object Drawing.Point(10, 5); Size = New-Object Drawing.Size(500, 20); Text = 'Found this game:' }))
-    $form.Controls.Add((New-Object Windows.Forms.Label -Property @{ Location = New-Object Drawing.Point(10, 25); Size = New-Object Drawing.Size(500, 20); ForeColor = 'Gold'; Text = $global:GameNameShow; Font = New-Object System.Drawing.Font('Consolas', 13, [System.Drawing.FontStyle]::Bold) }))
-    
-    $hasImg = Test-Path $imgFile
-    if ($hasImg) {
-        $img = [System.Drawing.Image]::FromFile($imgFile)
-        $pic = New-Object Windows.Forms.PictureBox -Property @{ Location = New-Object Drawing.Point(12, 55); Size = New-Object Drawing.Size(460, 215); Image = $img; SizeMode = 'StretchImage' }
-        $form.Controls.Add($pic)
+    $headerLbl = New-Object Windows.Forms.Label -Property @{
+        Location = New-Object Drawing.Point(17, 10)
+        Size     = New-Object Drawing.Size(460, 22)
+        Text     = "Select a game ($($uiState.CurrentResults.Count) results):"
+    }
+    $form.Controls.Add($headerLbl)
+
+    $listBox = New-Object Windows.Forms.ListBox -Property @{
+        Location            = New-Object Drawing.Point(17, 36)
+        Size                = New-Object Drawing.Size(460, 190)
+        BackColor           = '#1E1E1E'
+        ForeColor           = 'White'
+        Font                = New-Object System.Drawing.Font('Consolas', 11)
+        HorizontalScrollbar = $true
+        IntegralHeight      = $false
+    }
+    foreach ($item in $uiState.CurrentResults) {
+        [void]$listBox.Items.Add("$($item.Name) ($($item.Id))")
+    }
+    $form.Controls.Add($listBox)
+
+    $selectedTitleLbl = New-Object Windows.Forms.Label -Property @{
+        Location     = New-Object Drawing.Point(17, 234)
+        Size         = New-Object Drawing.Size(460, 24)
+        ForeColor    = 'Gold'
+        Font         = New-Object System.Drawing.Font('Consolas', 12, [System.Drawing.FontStyle]::Bold)
+        AutoEllipsis = $true
+    }
+    $form.Controls.Add($selectedTitleLbl)
+
+    $pic = New-Object Windows.Forms.PictureBox -Property @{
+        Location  = New-Object Drawing.Point(17, 265)
+        Size      = New-Object Drawing.Size(460, 215)
+        SizeMode  = 'StretchImage'
+        BackColor = '#1E1E1E'
+        Visible   = $false
+    }
+    $form.Controls.Add($pic)
+
+    $noImgLbl = New-Object Windows.Forms.Label -Property @{
+        Location  = New-Object Drawing.Point(17, 265)
+        Size      = New-Object Drawing.Size(460, 215)
+        Text      = '(No header image available)'
+        ForeColor = 'Gray'
+        BackColor = '#1E1E1E'
+        TextAlign = 'MiddleCenter'
+        Visible   = $false
+    }
+    $form.Controls.Add($noImgLbl)
+
+    $btnContinue = New-Object Windows.Forms.Button -Property @{
+        Location                = New-Object Drawing.Point(17, 495)
+        Size                    = New-Object Drawing.Size(220, 34)
+        Text                    = 'CONTINUE'
+        DialogResult            = [Windows.Forms.DialogResult]::Yes
+        ForeColor               = 'Black'
+        BackColor               = [System.Drawing.SystemColors]::Control
+        UseVisualStyleBackColor = $true
+    }
+    $btnCancel = New-Object Windows.Forms.Button -Property @{
+        Location                = New-Object Drawing.Point(257, 495)
+        Size                    = New-Object Drawing.Size(220, 34)
+        Text                    = 'CANCEL'
+        DialogResult            = [Windows.Forms.DialogResult]::No
+        ForeColor               = 'Black'
+        BackColor               = [System.Drawing.SystemColors]::Control
+        UseVisualStyleBackColor = $true
+    }
+    $btnSteamDb = New-Object Windows.Forms.Button -Property @{
+        Location                = New-Object Drawing.Point(17, 537)
+        Size                    = New-Object Drawing.Size(460, 32)
+        Text                    = 'SEARCH STEAMDB (DELISTED GAMES)'
+        Font                    = New-Object System.Drawing.Font('Consolas', 11)
+        ForeColor               = 'Black'
+        BackColor               = [System.Drawing.SystemColors]::Control
+        UseVisualStyleBackColor = $true
+        Enabled                 = (-not $global:SearchUsedSteamDb)
+    }
+
+    $form.Controls.Add($btnContinue)
+    $form.Controls.Add($btnCancel)
+    $form.Controls.Add($btnSteamDb)
+    $form.AcceptButton = $btnContinue
+    $form.CancelButton = $btnCancel
+
+    $previewTimer = New-Object Windows.Forms.Timer -Property @{
+        Interval = 150
+    }
+
+    $showPreviewImage = {
+        param($imgObj)
+        if ($imgObj) {
+            $pic.Image = $imgObj
+            $pic.Visible = $true
+            $noImgLbl.Visible = $false
+        } else {
+            $pic.Image = $null
+            $pic.Visible = $false
+            $noImgLbl.Text = '(No header image available)'
+            $noImgLbl.Visible = $true
+        }
+    }
+
+    $previewTimer.Add_Tick({
+        $previewTimer.Stop()
+        $appId = $uiState.PendingAppId
+        if (-not $appId) { return }
+
+        if (-not $uiState.ImgCache.ContainsKey($appId)) {
+            $tempImgFile = Join-Path ([System.IO.Path]::GetTempPath()) "gse_preview_$appId.jpg"
+            $loadedImg = $null
+            try {
+                Invoke-WebRequest -Uri "https://cdn.akamai.steamstatic.com/steam/apps/$appId/header.jpg" -OutFile $tempImgFile -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+                if (Test-Path $tempImgFile) {
+                    $bytes = [System.IO.File]::ReadAllBytes($tempImgFile)
+                    if ($bytes -and $bytes.Length -gt 0) {
+                        $ms = New-Object System.IO.MemoryStream(,$bytes)
+                        [void]$uiState.ImageStreams.Add($ms)
+                        $loadedImg = [System.Drawing.Image]::FromStream($ms)
+                    }
+                }
+            } catch {
+                $loadedImg = $null
+            } finally {
+                Remove-Item -Path $tempImgFile -Force -ErrorAction SilentlyContinue
+            }
+            $uiState.ImgCache[$appId] = $loadedImg
+        }
+
+        $idx = $listBox.SelectedIndex
+        if ($idx -ge 0 -and $idx -lt $uiState.CurrentResults.Count -and $uiState.CurrentResults[$idx].Id -eq $appId) {
+            & $showPreviewImage $uiState.ImgCache[$appId]
+        }
+    })
+
+    $listBox.Add_SelectedIndexChanged({
+        $idx = $listBox.SelectedIndex
+        if ($idx -lt 0 -or $idx -ge $uiState.CurrentResults.Count) {
+            $btnContinue.Enabled = $false
+            $selectedTitleLbl.Text = ''
+            $uiState.PendingAppId = $null
+            $previewTimer.Stop()
+            & $showPreviewImage $null
+            return
+        }
+
+        $btnContinue.Enabled = $true
+        $item = $uiState.CurrentResults[$idx]
+        $selectedTitleLbl.Text = "$($item.Name) ($($item.Id))"
+        $appId = $item.Id
+
+        if ($uiState.ImgCache.ContainsKey($appId)) {
+            $uiState.PendingAppId = $null
+            $previewTimer.Stop()
+            & $showPreviewImage $uiState.ImgCache[$appId]
+        } else {
+            $pic.Image = $null
+            $pic.Visible = $false
+            $noImgLbl.Text = 'Loading preview...'
+            $noImgLbl.Visible = $true
+            $uiState.PendingAppId = $appId
+            $previewTimer.Stop()
+            $previewTimer.Start()
+        }
+    })
+
+    $listBox.Add_DoubleClick({
+        if ($listBox.SelectedIndex -ge 0) {
+            $form.DialogResult = [Windows.Forms.DialogResult]::Yes
+            $form.Close()
+        }
+    })
+
+    $btnSteamDb.Add_Click({
+        $previewTimer.Stop()
+        $btnSteamDb.Enabled = $false
+        $btnContinue.Enabled = $false
+        $listBox.Enabled = $false
+        $btnSteamDb.Text = 'SEARCHING STEAMDB...'
+        $form.Cursor = [Windows.Forms.Cursors]::WaitCursor
+        [Windows.Forms.Application]::DoEvents()
+
+        $dbResults = @(Get-SteamDbResults -Query $global:LastSearchQuery)
+
+        $form.Cursor = [Windows.Forms.Cursors]::Default
+        $listBox.Enabled = $true
+
+        if ($dbResults.Count -gt 0) {
+            $uiState.CurrentResults = $dbResults
+            $listBox.Items.Clear()
+            foreach ($item in $uiState.CurrentResults) {
+                [void]$listBox.Items.Add("$($item.Name) ($($item.Id))")
+            }
+            $headerLbl.Text = "Select a game from SteamDB ($($dbResults.Count) results):"
+            $listBox.SelectedIndex = 0
+            $btnContinue.Enabled = $true
+            $btnSteamDb.Text = 'STEAMDB RESULTS LOADED'
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("No results found on SteamDB for '$($global:LastSearchQuery)'.", $global:TITLE, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            $btnContinue.Enabled = ($listBox.SelectedIndex -ge 0)
+            $btnSteamDb.Text = 'NO STEAMDB RESULTS'
+        }
+    })
+
+    if ($listBox.Items.Count -gt 0) {
+        $listBox.SelectedIndex = 0
     } else {
-        $noImgLbl = New-Object Windows.Forms.Label -Property @{ Location = New-Object Drawing.Point(12, 140); Size = New-Object Drawing.Size(460, 20); Text = '(No header image available)'; ForeColor = 'Gray'; TextAlign = 'MiddleCenter' }
-        $form.Controls.Add($noImgLbl)
+        $btnContinue.Enabled = $false
     }
-
-    $form.Controls.Add((New-Object Windows.Forms.Label -Property @{ Location = New-Object Drawing.Point(10, 280); Size = New-Object Drawing.Size(500, 20); Text = 'Do you want to continue?' }))
-
-    $btnYes = New-Object Windows.Forms.Button -Property @{ Location = New-Object Drawing.Point(30, 310); Size = New-Object Drawing.Size(200, 30); Text = 'YES'; DialogResult = [Windows.Forms.DialogResult]::Yes; ForeColor = 'Black' }
-    $btnNo = New-Object Windows.Forms.Button -Property @{ Location = New-Object Drawing.Point(260, 310); Size = New-Object Drawing.Size(200, 30); Text = 'NO'; DialogResult = [Windows.Forms.DialogResult]::No; ForeColor = 'Black' }
-    
-    $form.Controls.Add($btnYes)
-    $form.Controls.Add($btnNo)
 
     $res = $form.ShowDialog()
-    
-    if ($hasImg) {
-        $img.Dispose()
-        Remove-Item -Path $imgFile -Force -ErrorAction SilentlyContinue
+    $selectedIndex = $listBox.SelectedIndex
+
+    $previewTimer.Stop()
+    $previewTimer.Dispose()
+    $pic.Image = $null
+
+    foreach ($cachedImg in $uiState.ImgCache.Values) {
+        if ($cachedImg) {
+            $cachedImg.Dispose()
+        }
     }
-    
-    if ($res -eq [Windows.Forms.DialogResult]::Yes) {
+    foreach ($ms in $uiState.ImageStreams) {
+        if ($ms) {
+            $ms.Dispose()
+        }
+    }
+    $form.Dispose()
+
+    if ($res -eq [Windows.Forms.DialogResult]::Yes -and $selectedIndex -ge 0 -and $selectedIndex -lt $uiState.CurrentResults.Count) {
+        $chosen = $uiState.CurrentResults[$selectedIndex]
+        $chosenName = "$($chosen.Name)".Trim()
+        $chosenId = "$($chosen.Id)".Trim()
+
+        $global:GameNameShow = $chosenName
+        $global:GameAppID = $chosenId
+        $global:GameName = "$chosenName ($chosenId)" -replace '[/:<>\\|?*]', ''
+
+        Write-Host "    $($global:GameName)" -ForegroundColor DarkGray
+
         $settingsDir = Join-Path $global:HOME_DIR "$global:GameName\steam_settings"
         if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir | Out-Null }
         Set-Content -Path (Join-Path $settingsDir "steam_appid.txt") -Value $global:GameAppID
